@@ -1,5 +1,5 @@
 // ============================================
-// GameArena - ساحة المعركة مع نظام أسلحة متقدم
+// GameArena - Refactored with modular systems
 // ============================================
 
 import React, { useRef, useEffect, useState, useCallback } from 'react';
@@ -11,15 +11,15 @@ import { RealtimeChannel } from '@supabase/supabase-js';
 import { ArrowLeft } from 'lucide-react';
 import { hapticImpact } from '../lib/telegram';
 import { soundManager } from '../lib/soundManager';
-import {
-  WEAPONS, WeaponState, createDefaultWeaponState,
-  LootItem, LootType, LOOT_CONFIGS, AmmoType,
-} from '../lib/weapons';
+import { WEAPONS, LootItem, LootType, LOOT_CONFIGS, AmmoType } from '../lib/weapons';
+import { WeaponSystem, FiredBullet, FireResult } from '../lib/WeaponSystem';
+import { VFXSystem } from '../lib/VFXSystem';
+import { PlayerRenderer, PlayerRenderData } from '../lib/PlayerRenderer';
 
 // Constants
 const MAP_WIDTH = 2000;
 const MAP_HEIGHT = 2000;
-const PLAYER_RADIUS = 15;
+const PLAYER_RADIUS = PlayerRenderer.RADIUS;
 const PLAYER_SPEED = 4;
 const BULLET_SIZE = 4;
 const GRID_SIZE = 50;
@@ -35,13 +35,6 @@ const LOOT_SPAWN_COUNT = 30;
 
 interface Vector2 { x: number; y: number }
 
-interface Bullet {
-  x: number; y: number;
-  vx: number; vy: number;
-  life: number;
-  damage: number;
-}
-
 interface RemotePlayer {
   userId: string; username: string;
   x: number; y: number;
@@ -50,6 +43,7 @@ interface RemotePlayer {
   lastUpdate: number;
   team?: 'blue' | 'red';
   skin?: string;
+  skinLevel?: number;
 }
 
 // Generate random loot items
@@ -57,7 +51,6 @@ function generateLoot(): LootItem[] {
   const types: LootType[] = ['ammo_556', 'ammo_9mm', 'ammo_300', 'ammo_12g', 'medkit', 'armor'];
   const weaponIds = Object.keys(WEAPONS);
   const items: LootItem[] = [];
-
   for (let i = 0; i < LOOT_SPAWN_COUNT; i++) {
     const isWeapon = Math.random() < 0.15;
     const type: LootType = isWeapon ? 'weapon' : types[Math.floor(Math.random() * types.length)];
@@ -66,8 +59,7 @@ function generateLoot(): LootItem[] {
       id: `loot_${i}`,
       x: Math.random() * (MAP_WIDTH - 100) + 50,
       y: Math.random() * (MAP_HEIGHT - 100) + 50,
-      type,
-      amount: config.amount,
+      type, amount: config.amount,
       weaponId: isWeapon ? weaponIds[Math.floor(Math.random() * weaponIds.length)] : undefined,
       radius: config.radius,
       emoji: isWeapon ? '🔫' : config.emoji,
@@ -75,6 +67,8 @@ function generateLoot(): LootItem[] {
   }
   return items;
 }
+
+const WEAPON_LIST = Object.values(WEAPONS);
 
 const GameArena = () => {
   const navigate = useNavigate();
@@ -86,6 +80,10 @@ const GameArena = () => {
   const channelRef = useRef<RealtimeChannel | null>(null);
   const lastBroadcastTime = useRef<number>(0);
 
+  // Systems
+  const weaponSystem = useRef(new WeaponSystem());
+  const vfxSystem = useRef(new VFXSystem());
+
   // Player state
   const [playerPos, setPlayerPos] = useState<Vector2>({ x: MAP_WIDTH / 2, y: MAP_HEIGHT / 2 });
   const playerVel = useRef<Vector2>({ x: 0, y: 0 });
@@ -93,18 +91,11 @@ const GameArena = () => {
   const [localHealth, setLocalHealth] = useState(100);
   const [armor, setArmor] = useState(0);
   const [isDead, setIsDead] = useState(false);
-  const bullets = useRef<Bullet[]>([]);
+  const bullets = useRef<FiredBullet[]>([]);
   const [kills, setKills] = useState(0);
 
-  // Weapon state
-  const weaponState = useRef<WeaponState>(createDefaultWeaponState());
-  const [weaponDisplay, setWeaponDisplay] = useState({
-    name: weaponState.current.currentWeapon.nameAr,
-    ammoInMag: weaponState.current.ammoInMag,
-    reserveAmmo: weaponState.current.reserveAmmo[weaponState.current.currentWeapon.ammoType],
-    isReloading: false,
-    reloadProgress: 0,
-  });
+  // Weapon display
+  const [weaponDisplay, setWeaponDisplay] = useState(weaponSystem.current.getDisplayState());
 
   // Loot
   const lootItems = useRef<LootItem[]>(generateLoot());
@@ -126,10 +117,18 @@ const GameArena = () => {
   const joystickBasePos = useRef<Vector2>({ x: 100, y: 100 });
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
 
+  // Weapon selector
+  const [showWeaponSelector, setShowWeaponSelector] = useState(false);
+
   // Redirect if no squad
   useEffect(() => {
     if (!loading && !currentSquad) navigate('/');
   }, [currentSquad, loading, navigate]);
+
+  // Cleanup
+  useEffect(() => {
+    return () => { weaponSystem.current.destroy(); };
+  }, []);
 
   // Realtime channel
   useEffect(() => {
@@ -207,49 +206,20 @@ const GameArena = () => {
     return () => window.removeEventListener('resize', updateSize);
   }, []);
 
-  // Reload handler
-  const startReload = useCallback(() => {
-    const ws = weaponState.current;
-    if (ws.isReloading) return;
-    const ammoType = ws.currentWeapon.ammoType;
-    if (ws.reserveAmmo[ammoType] <= 0) return;
-    if (ws.ammoInMag >= ws.currentWeapon.magazineSize) return;
-
-    ws.isReloading = true;
-    ws.reloadStartTime = performance.now();
-    soundManager.playReload();
-
-    setTimeout(() => {
-      const needed = ws.currentWeapon.magazineSize - ws.ammoInMag;
-      const available = ws.reserveAmmo[ammoType];
-      const toLoad = Math.min(needed, available);
-      ws.ammoInMag += toLoad;
-      ws.reserveAmmo[ammoType] -= toLoad;
-      ws.isReloading = false;
-      setWeaponDisplay(prev => ({
-        ...prev,
-        ammoInMag: ws.ammoInMag,
-        reserveAmmo: ws.reserveAmmo[ammoType],
-        isReloading: false,
-      }));
-    }, ws.currentWeapon.reloadTime);
+  const handleReload = useCallback(() => {
+    const started = weaponSystem.current.startReload(() => {
+      setWeaponDisplay(weaponSystem.current.getDisplayState());
+    });
+    if (started) {
+      soundManager.playReload();
+      setWeaponDisplay(weaponSystem.current.getDisplayState());
+    }
   }, []);
 
-  // Switch weapon
-  const switchWeapon = useCallback((weaponId: string) => {
-    const weapon = WEAPONS[weaponId];
-    if (!weapon) return;
-    const ws = weaponState.current;
-    ws.currentWeapon = weapon;
-    ws.ammoInMag = Math.min(ws.ammoInMag, weapon.magazineSize);
-    ws.isReloading = false;
-    setWeaponDisplay({
-      name: weapon.nameAr,
-      ammoInMag: ws.ammoInMag,
-      reserveAmmo: ws.reserveAmmo[weapon.ammoType],
-      isReloading: false,
-      reloadProgress: 0,
-    });
+  const handleSwitchWeapon = useCallback((weaponId: string) => {
+    weaponSystem.current.switchWeapon(weaponId);
+    setWeaponDisplay(weaponSystem.current.getDisplayState());
+    setShowWeaponSelector(false);
   }, []);
 
   // Game loop
@@ -258,15 +228,20 @@ const GameArena = () => {
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
+    let lastTimestamp = 0;
 
     const gameLoop = (timestamp: number) => {
+      const dt = lastTimestamp ? (timestamp - lastTimestamp) / 1000 : 1 / 60;
+      lastTimestamp = timestamp;
+
       if (isDead) {
+        vfxSystem.current.update(dt);
         render(ctx, timestamp);
         animationRef.current = requestAnimationFrame(gameLoop);
         return;
       }
 
-      const ws = weaponState.current;
+      const ws = weaponSystem.current;
 
       // Movement
       if (joystickActive) {
@@ -289,46 +264,27 @@ const GameArena = () => {
         y: Math.max(PLAYER_RADIUS, Math.min(MAP_HEIGHT - PLAYER_RADIUS, prev.y + playerVel.current.y)),
       }));
 
-      // Shooting with weapon system
-      if (shooting && !ws.isReloading) {
-        if (ws.ammoInMag <= 0) {
-          startReload();
-        } else if (timestamp - ws.lastShotTime > ws.currentWeapon.fireRate) {
-          ws.lastShotTime = timestamp;
-          ws.ammoInMag--;
-
-          const angle = playerRotation.current;
-          const weapon = ws.currentWeapon;
-
-          for (let p = 0; p < weapon.pelletsPerShot; p++) {
-            const spreadAngle = angle + (Math.random() - 0.5) * weapon.spread;
-            const dirX = Math.cos(spreadAngle);
-            const dirY = Math.sin(spreadAngle);
-            bullets.current.push({
-              x: playerPos.x + dirX * (PLAYER_RADIUS + 2),
-              y: playerPos.y + dirY * (PLAYER_RADIUS + 2),
-              vx: dirX * weapon.bulletSpeed,
-              vy: dirY * weapon.bulletSpeed,
-              life: weapon.bulletRange / weapon.bulletSpeed / 60,
-              damage: weapon.damage,
-            });
-          }
-
-          soundManager.playGunshot(weapon.soundId);
+      // Shooting via WeaponSystem
+      if (shooting) {
+        const result: FireResult | null = ws.tryFire(
+          timestamp, playerPos.x, playerPos.y,
+          playerRotation.current, PLAYER_RADIUS, user?.id ?? '',
+        );
+        if (result) {
+          bullets.current.push(...result.bullets);
+          soundManager.playGunshot(ws.weapon.soundId);
           hapticImpact('light');
-
-          setWeaponDisplay(prev => ({
-            ...prev,
-            ammoInMag: ws.ammoInMag,
-          }));
+          vfxSystem.current.addMuzzleFlash(
+            result.muzzleX, result.muzzleY,
+            result.muzzleAngle, ws.weapon.type,
+          );
+          setWeaponDisplay(ws.getDisplayState());
         }
       }
 
-      // Update reload progress
-      if (ws.isReloading) {
-        const elapsed = timestamp - ws.reloadStartTime;
-        const progress = Math.min(1, elapsed / ws.currentWeapon.reloadTime);
-        setWeaponDisplay(prev => ({ ...prev, isReloading: true, reloadProgress: progress }));
+      // Update reload progress display
+      if (ws.state.isReloading) {
+        setWeaponDisplay(ws.getDisplayState());
       }
 
       // Update bullets & check collisions
@@ -343,11 +299,15 @@ const GameArena = () => {
             const dist = Math.hypot(b.x - remote.x, b.y - remote.y);
             if (dist < PLAYER_RADIUS + BULLET_SIZE / 2) {
               remote.health -= b.damage;
+              const isKill = remote.health <= 0;
+
+              vfxSystem.current.addHitMarker(remote.x, remote.y, isKill);
+
               channelRef.current?.send({
                 type: 'broadcast', event: 'player_hit',
                 payload: { targetUserId: id, damage: b.damage, killerId: user?.id },
               });
-              if (remote.health <= 0) {
+              if (isKill) {
                 channelRef.current?.send({
                   type: 'broadcast', event: 'player_died',
                   payload: { userId: id, killerId: user?.id },
@@ -358,7 +318,7 @@ const GameArena = () => {
           }
           return b;
         })
-        .filter(b => b !== null && b.life > 0 && b.x >= 0 && b.x <= MAP_WIDTH && b.y >= 0 && b.y <= MAP_HEIGHT) as Bullet[];
+        .filter(b => b !== null && b.life > 0 && b.x >= 0 && b.x <= MAP_WIDTH && b.y >= 0 && b.y <= MAP_HEIGHT) as FiredBullet[];
 
       // Loot pickup
       lootItems.current = lootItems.current.filter(loot => {
@@ -372,19 +332,15 @@ const GameArena = () => {
           } else if (loot.type === 'armor') {
             setArmor(a => Math.min(100, a + loot.amount));
           } else if (loot.type === 'weapon' && loot.weaponId) {
-            switchWeapon(loot.weaponId);
+            handleSwitchWeapon(loot.weaponId);
           } else {
-            // Ammo
             const ammoMap: Record<string, AmmoType> = {
               ammo_556: '5.56mm', ammo_9mm: '9mm', ammo_300: '.300mag', ammo_12g: '12gauge',
             };
             const ammoType = ammoMap[loot.type];
             if (ammoType) {
-              ws.reserveAmmo[ammoType] += loot.amount;
-              setWeaponDisplay(prev => ({
-                ...prev,
-                reserveAmmo: ws.reserveAmmo[ws.currentWeapon.ammoType],
-              }));
+              ws.addAmmo(ammoType, loot.amount);
+              setWeaponDisplay(ws.getDisplayState());
             }
           }
           return false;
@@ -417,9 +373,13 @@ const GameArena = () => {
             rotation: playerRotation.current,
             health: localHealth, team: myTeam,
             skin: user?.selectedSkin,
+            skinLevel: ws.state.skinLevel,
           },
         });
       }
+
+      // Update VFX
+      vfxSystem.current.update(dt);
 
       render(ctx, timestamp);
       animationRef.current = requestAnimationFrame(gameLoop);
@@ -427,7 +387,7 @@ const GameArena = () => {
 
     animationRef.current = requestAnimationFrame(gameLoop);
     return () => { if (animationRef.current) cancelAnimationFrame(animationRef.current); };
-  }, [joystickActive, shooting, playerPos, localHealth, isDead, user, myTeam, zoneCenter, zoneRadius, armor, startReload, switchWeapon]);
+  }, [joystickActive, shooting, playerPos, localHealth, isDead, user, myTeam, zoneCenter, zoneRadius, armor, handleReload, handleSwitchWeapon]);
 
   // Zone shrinking
   useEffect(() => {
@@ -439,7 +399,7 @@ const GameArena = () => {
   }, [currentSquad]);
 
   // Render function
-  const render = (ctx: CanvasRenderingContext2D, _timestamp: number) => {
+  const render = (ctx: CanvasRenderingContext2D, timestamp: number) => {
     const { width, height } = canvasSize;
     if (width === 0 || height === 0) return;
     const halfW = width / 2;
@@ -472,7 +432,7 @@ const GameArena = () => {
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // Danger zone overlay (outside circle)
+    // Danger zone overlay
     ctx.save();
     ctx.beginPath();
     ctx.rect(0, 0, width, height);
@@ -481,11 +441,25 @@ const GameArena = () => {
     ctx.fill();
     ctx.restore();
 
-    // Loot items
+    // Loot items with glow
     lootItems.current.forEach(loot => {
       const sx = loot.x - playerPos.x + halfW;
       const sy = loot.y - playerPos.y + halfH;
       if (sx < -30 || sx > width + 30 || sy < -30 || sy > height + 30) return;
+
+      // Glow effect
+      const pulse = Math.sin(timestamp / 300 + loot.x) * 0.2 + 0.8;
+      const glowColor = loot.type === 'weapon' ? 'rgba(255, 200, 50, 0.3)'
+        : loot.type === 'medkit' ? 'rgba(50, 255, 50, 0.3)'
+        : loot.type === 'armor' ? 'rgba(50, 100, 255, 0.3)'
+        : 'rgba(255, 255, 255, 0.15)';
+
+      ctx.beginPath();
+      ctx.arc(sx, sy, loot.radius + 4, 0, Math.PI * 2);
+      ctx.fillStyle = glowColor;
+      ctx.globalAlpha = pulse;
+      ctx.fill();
+      ctx.globalAlpha = 1;
 
       ctx.beginPath();
       ctx.arc(sx, sy, loot.radius, 0, Math.PI * 2);
@@ -501,118 +475,70 @@ const GameArena = () => {
       ctx.fillText(loot.emoji, sx, sy);
     });
 
-    // Bullets
+    // Bullets with trails
     ctx.shadowColor = '#ffff00';
     ctx.shadowBlur = 8;
     bullets.current.forEach(b => {
       const sx = b.x - playerPos.x + halfW;
       const sy = b.y - playerPos.y + halfH;
-      if (sx < 0 || sx > width || sy < 0 || sy > height) return;
+      if (sx < -10 || sx > width + 10 || sy < -10 || sy > height + 10) return;
 
-      // Bullet trail
+      // Trail
+      const trailLen = 6;
+      const tx = sx - (b.vx / Math.hypot(b.vx, b.vy)) * trailLen;
+      const ty = sy - (b.vy / Math.hypot(b.vx, b.vy)) * trailLen;
+      ctx.strokeStyle = `rgba(255, 200, 50, ${Math.min(1, b.life * 2)})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(tx, ty);
+      ctx.lineTo(sx, sy);
+      ctx.stroke();
+
       ctx.beginPath();
       ctx.arc(sx, sy, BULLET_SIZE, 0, Math.PI * 2);
       ctx.fillStyle = `rgba(255, 200, 50, ${Math.min(1, b.life * 3)})`;
       ctx.fill();
-
-      // Muzzle flash effect (first few frames)
-      if (b.life > 0.9) {
-        ctx.beginPath();
-        ctx.arc(sx, sy, BULLET_SIZE * 3, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(255, 255, 200, 0.3)';
-        ctx.fill();
-      }
     });
     ctx.shadowBlur = 0;
 
-    // Remote players
+    // Remote players via PlayerRenderer
     remotePlayersRef.current.forEach(remote => {
       const sx = remote.x - playerPos.x + halfW;
       const sy = remote.y - playerPos.y + halfH;
       if (sx < -50 || sx > width + 50 || sy < -50 || sy > height + 50) return;
 
-      const isTeammate = remote.team === myTeam;
-      const bodyColor = remote.team === 'blue' ? '#4d8fff' : '#ff4d4d';
-
-      // Teammate glow
-      if (isTeammate && remote.health > 0) {
-        ctx.beginPath();
-        ctx.arc(sx, sy, PLAYER_RADIUS + 5, 0, Math.PI * 2);
-        ctx.strokeStyle = '#00ff88';
-        ctx.lineWidth = 2;
-        ctx.shadowColor = '#00ff88';
-        ctx.shadowBlur = 10;
-        ctx.stroke();
-        ctx.shadowBlur = 0;
-      }
-
-      // Body
-      ctx.beginPath();
-      ctx.arc(sx, sy, PLAYER_RADIUS, 0, Math.PI * 2);
-      ctx.fillStyle = remote.health > 0 ? bodyColor : '#444';
-      ctx.fill();
-
-      // Direction indicator
-      const tipX = sx + Math.cos(remote.rotation) * (PLAYER_RADIUS + 5);
-      const tipY = sy + Math.sin(remote.rotation) * (PLAYER_RADIUS + 5);
-      ctx.beginPath();
-      ctx.moveTo(tipX, tipY);
-      ctx.lineTo(sx + Math.cos(remote.rotation + 2.5) * PLAYER_RADIUS, sy + Math.sin(remote.rotation + 2.5) * PLAYER_RADIUS);
-      ctx.lineTo(sx + Math.cos(remote.rotation - 2.5) * PLAYER_RADIUS, sy + Math.sin(remote.rotation - 2.5) * PLAYER_RADIUS);
-      ctx.closePath();
-      ctx.fillStyle = '#fff';
-      ctx.fill();
-
-      // Health bar
-      const barW = PLAYER_RADIUS * 2;
-      const barX = sx - barW / 2;
-      const barY = sy - PLAYER_RADIUS - 10;
-      ctx.fillStyle = '#333';
-      ctx.fillRect(barX, barY, barW, 4);
-      ctx.fillStyle = remote.health > 50 ? '#0f0' : remote.health > 20 ? '#ff0' : '#f00';
-      ctx.fillRect(barX, barY, barW * (remote.health / 100), 4);
-
-      // Name
-      ctx.font = 'bold 10px monospace';
-      ctx.fillStyle = '#fff';
-      ctx.textAlign = 'left';
-      ctx.fillText(remote.username, barX, barY - 3);
+      const renderData: PlayerRenderData = {
+        x: remote.x, y: remote.y,
+        rotation: remote.rotation,
+        health: remote.health,
+        armor: 0,
+        team: (remote.team as 'blue' | 'red') ?? 'red',
+        username: remote.username,
+        skinId: remote.skin ?? 'soldier',
+        skinLevel: remote.skinLevel ?? 1,
+        isLocal: false,
+        isDead: remote.health <= 0,
+      };
+      PlayerRenderer.render(ctx, renderData, sx, sy, timestamp);
     });
 
-    // Local player
-    ctx.beginPath();
-    ctx.arc(halfW, halfH, PLAYER_RADIUS + 4, 0, Math.PI * 2);
-    ctx.strokeStyle = '#00ff88';
-    ctx.lineWidth = 2;
-    ctx.stroke();
+    // Local player via PlayerRenderer
+    const localData: PlayerRenderData = {
+      x: playerPos.x, y: playerPos.y,
+      rotation: playerRotation.current,
+      health: localHealth,
+      armor,
+      team: myTeam,
+      username: user?.username ?? '',
+      skinId: user?.selectedSkin ?? 'soldier',
+      skinLevel: weaponSystem.current.state.skinLevel,
+      isLocal: true,
+      isDead,
+    };
+    PlayerRenderer.render(ctx, localData, halfW, halfH, timestamp);
 
-    ctx.beginPath();
-    ctx.arc(halfW, halfH, PLAYER_RADIUS, 0, Math.PI * 2);
-    ctx.fillStyle = myTeam === 'blue' ? '#4d8fff' : '#ff4d4d';
-    ctx.shadowColor = myTeam === 'blue' ? '#4d8fff' : '#ff4d4d';
-    ctx.shadowBlur = 15;
-    ctx.fill();
-    ctx.shadowBlur = 0;
-
-    // Direction triangle
-    const tipX = halfW + Math.cos(playerRotation.current) * (PLAYER_RADIUS + 6);
-    const tipY = halfH + Math.sin(playerRotation.current) * (PLAYER_RADIUS + 6);
-    ctx.beginPath();
-    ctx.moveTo(tipX, tipY);
-    ctx.lineTo(halfW + Math.cos(playerRotation.current + 2.5) * PLAYER_RADIUS, halfH + Math.sin(playerRotation.current + 2.5) * PLAYER_RADIUS);
-    ctx.lineTo(halfW + Math.cos(playerRotation.current - 2.5) * PLAYER_RADIUS, halfH + Math.sin(playerRotation.current - 2.5) * PLAYER_RADIUS);
-    ctx.closePath();
-    ctx.fillStyle = '#fff';
-    ctx.fill();
-
-    // Local health bar
-    const barW = PLAYER_RADIUS * 2;
-    const barX = halfW - barW / 2;
-    const barY = halfH - PLAYER_RADIUS - 10;
-    ctx.fillStyle = '#333';
-    ctx.fillRect(barX, barY, barW, 4);
-    ctx.fillStyle = localHealth > 50 ? '#0f0' : localHealth > 20 ? '#ff0' : '#f00';
-    ctx.fillRect(barX, barY, barW * (localHealth / 100), 4);
+    // VFX layer (muzzle flashes, hit markers, particles)
+    vfxSystem.current.render(ctx, playerPos.x, playerPos.y, halfW, halfH);
 
     // Death overlay
     if (isDead) {
@@ -681,10 +607,12 @@ const GameArena = () => {
     touchStartPos.current = null;
   };
 
+  const ws = weaponSystem.current;
+
   return (
     <div
       ref={containerRef}
-      className="fixed inset-0 bg-slate-950 touch-none"
+      className="fixed inset-0 bg-background touch-none"
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
@@ -693,33 +621,33 @@ const GameArena = () => {
       {/* Back button */}
       <button
         onClick={() => isDead ? navigate('/') : window.confirm('مغادرة اللعبة؟') && navigate('/')}
-        className="absolute top-4 left-4 z-10 bg-slate-900/80 p-2 rounded-full border border-white/10 text-white"
+        className="absolute top-4 left-4 z-10 bg-card/80 p-2 rounded-full border border-border text-foreground"
       >
         <ArrowLeft size={20} />
       </button>
 
       {/* HUD - Top right: Kills */}
-      <div className="absolute top-4 right-4 z-10 bg-slate-900/80 px-3 py-1.5 rounded-lg border border-white/10 text-white text-sm font-mono">
+      <div className="absolute top-4 right-4 z-10 bg-card/80 px-3 py-1.5 rounded-lg border border-border text-foreground text-sm font-mono">
         💀 {kills}
       </div>
 
-      {/* HUD - Health & Armor bar */}
+      {/* HUD - Health & Armor */}
       <div className="absolute top-14 left-1/2 -translate-x-1/2 z-10 w-48">
-        <div className="bg-slate-900/80 rounded-lg p-2 border border-white/10">
+        <div className="bg-card/80 rounded-lg p-2 border border-border">
           <div className="flex items-center gap-1 mb-1">
             <span className="text-xs">❤️</span>
-            <div className="flex-1 bg-slate-700 rounded-full h-2">
-              <div className="bg-green-500 h-2 rounded-full transition-all" style={{ width: `${localHealth}%` }} />
+            <div className="flex-1 bg-muted rounded-full h-2">
+              <div className="bg-neon-green h-2 rounded-full transition-all" style={{ width: `${localHealth}%` }} />
             </div>
-            <span className="text-xs text-white font-mono">{Math.round(localHealth)}</span>
+            <span className="text-xs text-foreground font-mono">{Math.round(localHealth)}</span>
           </div>
           {armor > 0 && (
             <div className="flex items-center gap-1">
               <span className="text-xs">🛡️</span>
-              <div className="flex-1 bg-slate-700 rounded-full h-2">
-                <div className="bg-blue-500 h-2 rounded-full transition-all" style={{ width: `${armor}%` }} />
+              <div className="flex-1 bg-muted rounded-full h-2">
+                <div className="bg-kilegram-blue h-2 rounded-full transition-all" style={{ width: `${armor}%` }} />
               </div>
-              <span className="text-xs text-white font-mono">{Math.round(armor)}</span>
+              <span className="text-xs text-foreground font-mono">{Math.round(armor)}</span>
             </div>
           )}
         </div>
@@ -727,30 +655,67 @@ const GameArena = () => {
 
       {/* HUD - Weapon info */}
       <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10">
-        <div className="bg-slate-900/90 rounded-xl px-4 py-2 border border-cyan-500/20 text-center">
-          <div className="text-xs text-cyan-400 font-bold mb-1">{weaponDisplay.name}</div>
+        <div className="bg-card/90 rounded-xl px-4 py-2 border border-primary/20 text-center">
+          <button
+            onClick={() => setShowWeaponSelector(!showWeaponSelector)}
+            className="text-xs text-primary font-bold mb-1 flex items-center gap-1 mx-auto"
+          >
+            {weaponDisplay.name}
+            <span className="text-muted-foreground text-[10px]">
+              Lv.{weaponDisplay.skinLevel}
+            </span>
+            <span className="text-[10px]">▲</span>
+          </button>
           <div className="flex items-center gap-2">
             {weaponDisplay.isReloading ? (
               <div className="w-24">
-                <div className="bg-slate-700 rounded-full h-2">
-                  <div className="bg-yellow-500 h-2 rounded-full transition-all" style={{ width: `${weaponDisplay.reloadProgress * 100}%` }} />
+                <div className="bg-muted rounded-full h-2">
+                  <div className="bg-gold h-2 rounded-full transition-all" style={{ width: `${weaponDisplay.reloadProgress * 100}%` }} />
                 </div>
-                <div className="text-xs text-yellow-400 mt-0.5">إعادة تذخير...</div>
+                <div className="text-xs text-gold mt-0.5">إعادة تذخير...</div>
               </div>
             ) : (
-              <span className="text-white font-mono text-lg">
-                {weaponDisplay.ammoInMag} <span className="text-gray-400 text-sm">/ {weaponDisplay.reserveAmmo}</span>
+              <span className="text-foreground font-mono text-lg">
+                {weaponDisplay.ammoInMag} <span className="text-muted-foreground text-sm">/ {weaponDisplay.reserveAmmo}</span>
               </span>
             )}
           </div>
         </div>
+
+        {/* Weapon selector popup */}
+        {showWeaponSelector && (
+          <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 bg-card/95 border border-border rounded-xl p-2 min-w-[200px] backdrop-blur-sm">
+            {WEAPON_LIST.map(w => {
+              const hasAmmo = ws.state.reserveAmmo[w.ammoType] > 0 || w.id === ws.weapon.id;
+              return (
+                <button
+                  key={w.id}
+                  onClick={() => handleSwitchWeapon(w.id)}
+                  disabled={!hasAmmo}
+                  className={`w-full text-left px-3 py-2 rounded-lg text-sm flex justify-between items-center transition ${
+                    w.id === weaponDisplay.weaponId
+                      ? 'bg-primary/20 text-primary'
+                      : hasAmmo
+                        ? 'text-foreground hover:bg-muted'
+                        : 'text-muted-foreground opacity-50'
+                  }`}
+                >
+                  <span>{w.emoji} {w.nameAr}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {w.id === weaponDisplay.weaponId ? `${ws.state.ammoInMag}/${ws.state.reserveAmmo[w.ammoType]}` : ws.state.reserveAmmo[w.ammoType]}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Reload button */}
-      {!weaponDisplay.isReloading && weaponDisplay.ammoInMag < weaponState.current.currentWeapon.magazineSize && (
+      {!weaponDisplay.isReloading && weaponDisplay.ammoInMag < ws.weapon.magazineSize && (
         <button
-          onClick={startReload}
-          className="absolute bottom-20 right-4 z-10 bg-yellow-500/20 text-yellow-400 px-3 py-2 rounded-lg border border-yellow-500/40 text-sm font-bold"
+          onClick={handleReload}
+          className="absolute bottom-20 right-4 z-10 bg-gold/20 text-gold px-3 py-2 rounded-lg border border-gold/40 text-sm font-bold"
         >
           🔄 تذخير
         </button>
