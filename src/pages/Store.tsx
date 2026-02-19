@@ -15,9 +15,9 @@ const Store = () => {
 
   if (!user) return null
 
-  const handlePurchaseSkin = (skinId: string, price: number) => {
+  const handlePurchaseSkin = async (skinId: string, price: number) => {
     hapticImpact('medium')
-    const success = purchaseSkin(skinId)
+    const success = await purchaseSkin(skinId)
     if (success) {
       showPopup('تم شراء الشخصية بنجاح!', 'مبروك')
     } else {

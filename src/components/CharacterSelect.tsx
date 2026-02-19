@@ -23,7 +23,7 @@ const CharacterSelect = () => {
     hapticImpact('light');
   };
 
-  const handleConfirm = () => {
+  const handleConfirm = async () => {
     if (!user) return;
     
     const skin = AVAILABLE_SKINS.find(s => s.id === selectedId);
@@ -31,11 +31,10 @@ const CharacterSelect = () => {
 
     // إذا كانت الشخصية مدفوعة وغير مملوكة
     if (skin.price > 0 && !user.ownedSkins.includes(selectedId)) {
-      // محاولة الشراء
-      const success = purchaseSkin(selectedId);
+      const success = await purchaseSkin(selectedId);
       if (success) {
         showPopup('تم شراء الشخصية بنجاح!', 'مبروك');
-        navigate('/'); // الذهاب إلى الصفحة الرئيسية بعد الشراء
+        navigate('/');
       } else {
         showPopup('رصيد غير كافٍ!', 'فشل الشراء');
       }
