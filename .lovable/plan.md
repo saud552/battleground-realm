@@ -1,169 +1,116 @@
 
 
-# Phase 2.5: 3D Arena Upgrade with React Three Fiber
+# Kilegram Alpha — Visual Store & Armory Build Plan
 
 ## Overview
-Transform the current 2D Canvas-based `GameArena` into a professional 3D top-down battlefield using React Three Fiber, while keeping the existing weapon system, VFX logic, and networking intact.
+Build the polished Visual Store, Armory, and core UI shell for Kilegram — a 3D top-down Battle Royale Telegram Mini App. All weapons, characters, and gear will be rendered as detailed procedural 3D models using React Three Fiber, styled to match the military/tactical aesthetic of the reference art.
 
-## Architecture
+---
 
-The current monolithic `GameArena.tsx` (735 lines of 2D canvas code) will be restructured into a modular 3D system:
+## Phase 1: Foundation & Database Schema
 
-```text
-src/
-  components/
-    GameArena.tsx          -- Orchestrator: R3F Canvas + HUD overlay (replaces current)
-    arena/
-      Scene3D.tsx          -- Three.js scene: camera, lights, post-processing
-      Terrain.tsx          -- Ground plane with grid texture + zone circle
-      Buildings.tsx         -- Procedural buildings (boxes with neon edges)
-      PlayerModel3D.tsx    -- 3D player representation (capsule + weapon barrel)
-      RemotePlayer3D.tsx   -- Remote player with interpolation
-      Loot3D.tsx           -- Floating loot items with glow
-      Bullets3D.tsx        -- Bullet trails as instanced meshes
-      VFX3D.tsx            -- Muzzle flash + hit particles via drei
-      GameHUD.tsx          -- Extracted HTML overlay (health, ammo, weapon selector)
-      GameControls.tsx     -- Touch joystick + shoot controls (extracted)
-  hooks/
-    useGameLoop.ts         -- Core game tick: movement, shooting, collisions, zone
-    useBroadcast.ts        -- Supabase realtime channel logic (extracted)
-```
+### Supabase Schema Migration
+- Create/update the **profiles** table with fields: `telegram_id`, `username`, `first_name`, `level`, `xp`, `k_coins`, `k_gems`, `selected_skin`, `selected_weapon`, `total_kills`, `total_wins`, `total_matches`, `is_banned`
+- Create **inventory** table: `user_id`, `item_id`, `item_type` (skin/weapon/helmet/backpack), `item_name`, `skin_level`, `is_equipped`, `acquired_at`
+- Create **game_events** table for admin news pushes
+- Create **match_history** table for stats tracking
+- Create **user_roles** table with `admin`/`player` roles
+- Add a new ammo type `7.62mm` for AK-Death
+- Set up Row Level Security (RLS) policies for all tables
 
-## Dependencies to Install
-- `three@^0.160.0`
-- `@react-three/fiber@^8.18.0` (React 18 compatible)
-- `@react-three/drei@^9.122.0` (helpers: OrbitControls, Instances, etc.)
-- `@react-three/postprocessing@^2.16.0` (Bloom, vignette)
+### Game Data Registry
+- Define the official item catalog in code:
+  - **Characters:** Ghost Riley, Nova Prime, Viper Snake, Shadow Exe — each with unique color palette, armor style, and skin levels 1-5
+  - **Weapons:** K416 (5.56mm), AK-Death (7.62mm), AWM-X (.300 Mag), Vector-Neon (9mm), S12-Breacher (12 Gauge) — each with damage, fire rate, magazine, reload stats
+  - **Helmets:** Recon Cap, Tactical Ops, Titanium Juggernaut — with armor values
+  - **Backpacks:** Light Scout, Commando, Elite Expedition — with capacity values
 
-## Detailed Implementation
+---
 
-### 1. Scene3D.tsx -- The 3D World Container
-- **Camera**: Orthographic top-down camera positioned at `[0, 50, 0]` looking down, following the player
-- **Lighting**:
-  - Ambient light (low intensity, blue-tinted for cyberpunk feel)
-  - Directional light with shadow casting for building shadows
-  - Point lights on buildings (neon cyan/red accents)
-- **Post-processing**: Bloom effect (threshold 0.8, intensity 0.6) for neon glow on bullets, loot, and player effects
-- **Fog**: Subtle distance fog matching the dark background
+## Phase 2: Procedural 3D Models (React Three Fiber)
 
-### 2. Terrain.tsx -- The Battlefield Ground
-- Large plane geometry (2000x2000 units matching current MAP_SIZE)
-- Custom grid shader or repeating grid texture (cyan lines on dark surface)
-- Zone circle rendered as a transparent cylinder or ring mesh that shrinks over time
-- Danger zone visualized with a red-tinted plane outside the safe ring
+### Character Models
+Build 4 unique procedural 3D character models using R3F primitives:
+- **Ghost Riley** — Dark tactical operator with skull-motif visor, heavy armor plating, muted blacks/greys
+- **Nova Prime** — Sleek futuristic soldier with glowing cyan accents, streamlined armor
+- **Viper Snake** — Agile stealth operative with green/dark camo tones, slim profile
+- **Shadow Exe** — Digital warfare specialist with purple/neon highlights, angular armor
 
-### 3. Buildings.tsx -- Procedural Environment
-- 15-25 procedurally placed box geometries acting as buildings
-- Each building gets:
-  - Dark material base with neon edge highlights (using `<Edges>` from drei)
-  - Random height variation (2-6 units tall)
-  - Collision bounds stored in an array for bullet/player collision checks
-- Buildings placed avoiding the map center (spawn area)
+Each character built from capsules, cylinders, and custom shapes with emissive materials for skin levels 1-5.
 
-### 4. PlayerModel3D.tsx -- Local Player
-- Capsule geometry (body) with team-colored material
-- Cylinder for weapon barrel extending in aim direction
-- Skin level visual effects preserved:
-  - Level 2+: emissive glow on body material
-  - Level 4+: rotating ring mesh around player
-  - Level 5: particle system (drei `<Sparkles>`)
-- Position/rotation driven by `useGameLoop` hook
+### Weapon Models
+Build 5 detailed procedural 3D weapon models:
+- **K416** — Compact assault rifle with rail system, foregrip, red-dot sight
+- **AK-Death** — Heavy assault rifle with curved magazine, wooden/black finish, menacing profile
+- **AWM-X** — Long bolt-action sniper with scope, bipod, heavy barrel
+- **Vector-Neon** — Compact SMG with neon-accented body, folding stock
+- **S12-Breacher** — Bulky tactical shotgun with drum magazine, wide barrel
 
-### 5. RemotePlayer3D.tsx -- Networked Players
-- Same visual structure as local player
-- Position interpolated (lerp) from broadcast data
-- Health bar as a small plane above the player head
-- Username rendered with drei `<Text>` or `<Html>`
+### Gear Models
+- 3 helmet models with increasing bulk/protection visuals
+- 3 backpack models with size progression
 
-### 6. Loot3D.tsx -- Floating Loot Items
-- Instanced meshes for performance (up to 30 items)
-- Each loot item: small box or sphere with emissive material
-  - Gold glow for weapons, green for medkits, blue for armor, white for ammo
-- Floating animation (sine-wave Y offset) and slow rotation
-- Picked-up items removed from the instance buffer
+---
 
-### 7. Bullets3D.tsx -- Projectile System
-- Instanced cylinder meshes for active bullets
-- Yellow/orange emissive material with Bloom making them pop
-- Trail effect via short line segments or `<Trail>` from drei
-- Updated each frame from `bullets.current` array
+## Phase 3: Visual Store & Armory UI
 
-### 8. VFX3D.tsx -- Visual Effects
-- Muzzle flash: short-lived point light + sprite at barrel tip
-- Hit markers: brief particle burst at impact point
-- Kill indicator: `<Html>` overlay showing "KILL" text briefly
+### Store Page (`/store`)
+- Premium dark UI with military/gaming aesthetic (dark slate, neon accents)
+- **Tab navigation:** Characters | Weapons | Gear
+- Each item displayed as an interactive 3D card — the procedural model rotates on a lit platform
+- Item details panel: name, stats, price (K-Coins / K-Gems), rarity tier
+- "Buy" and "Equip" buttons with animated feedback
+- Player's current K-Coins and K-Gems balance displayed in header
+- Items already owned shown with "Owned" badge and "Equip" action
 
-### 9. GameHUD.tsx -- Extracted UI Overlay
-- All current HTML HUD elements (health bar, ammo display, weapon selector, reload button, kills counter) extracted from GameArena into a standalone React component
-- Rendered as an HTML overlay on top of the R3F Canvas (not inside the 3D scene)
-- No logic changes, just structural separation
+### Armory Page (loadout view within Store)
+- Shows currently equipped character, weapon, helmet, and backpack side by side
+- 3D preview of full loadout on a turntable
+- Quick-swap slots to change equipped items from owned inventory
+- Stats comparison when hovering alternative items
 
-### 10. GameControls.tsx -- Touch Input
-- Left-side touch joystick (same logic as current)
-- Right-side tap-to-shoot
-- Rendered as transparent HTML overlay
-- Outputs movement vector and shooting state to the game loop hook
+### Store Item Detail Modal
+- Full-screen 3D model viewer with orbit controls
+- Weapon stats radar chart (damage, fire rate, range, accuracy, magazine)
+- Character ability/lore description
+- Purchase confirmation flow
 
-### 11. useGameLoop.ts -- Core Logic Hook
-- Extracts all game tick logic from the current `useEffect` game loop:
-  - Player movement from joystick input
-  - Weapon system firing (`weaponSystem.tryFire`)
-  - Bullet updates and collision detection
-  - Loot pickup detection
-  - Zone damage calculation
-  - Remote player timeout cleanup
-- Returns game state consumed by 3D components
-- Runs via `useFrame` from R3F (synced to render loop)
+---
 
-### 12. useBroadcast.ts -- Network Hook
-- Extracts the Supabase realtime channel setup
-- Handles player_update, player_hit, player_died, game_started events
-- Returns remote players map and broadcast function
+## Phase 4: App Shell & Navigation
 
-## Refactored GameArena.tsx Structure
+### Main Layout
+- **Splash Screen** — Kilegram logo with animated entrance
+- **Home Screen** — Play button, current rank/level, active events banner
+- **Bottom Navigation** — Home, Store, Squad, Profile tabs
+- **Profile Page** — Player stats, match history, level progression bar
+- **Squad Page** — Create/join squad with squad code
 
-```text
-GameArena.tsx
-  |-- GameControls (HTML overlay - touch input)
-  |-- GameHUD (HTML overlay - health, ammo, weapon selector)
-  |-- R3F Canvas
-       |-- Scene3D
-            |-- Camera (orthographic, top-down)
-            |-- Lights (ambient + directional + point)
-            |-- PostProcessing (Bloom)
-            |-- Terrain (ground + grid + zone)
-            |-- Buildings (procedural)
-            |-- PlayerModel3D (local)
-            |-- RemotePlayer3D[] (networked)
-            |-- Loot3D (instanced)
-            |-- Bullets3D (instanced)
-            |-- VFX3D (particles)
-```
+### Telegram Mini App Integration
+- Authenticate using `window.Telegram.WebApp` context
+- Extract user data (telegram_id, first_name, username, photo_url)
+- Auto-create profile on first visit
+- Haptic feedback on purchases and actions
 
-## What Stays the Same
-- `src/lib/weapons.ts` -- weapon configs unchanged
-- `src/lib/WeaponSystem.ts` -- firing/reload logic unchanged
-- `src/lib/soundManager.ts` -- audio system unchanged
-- `src/context/AuthContext.tsx` -- auth unchanged
-- `src/context/SquadContext.tsx` -- squad unchanged
-- All networking/broadcast logic (just extracted into a hook)
-- All HUD functionality (just extracted into a component)
+---
 
-## Performance Considerations for Telegram Mini App
-- Orthographic camera (cheaper than perspective)
-- Instanced meshes for bullets and loot (single draw call each)
-- No complex 3D models -- all primitives (boxes, capsules, cylinders)
-- Bloom post-processing with conservative settings
-- Building count capped at 25
-- Shadow map limited to 1024x1024
-- `frameloop="demand"` option available if FPS drops on low-end devices
+## Phase 5: Admin Dashboard (`/admin`)
 
-## Implementation Order
-1. Install dependencies (three, R3F, drei, postprocessing)
-2. Create `useGameLoop.ts` and `useBroadcast.ts` hooks (extract existing logic)
-3. Create `GameControls.tsx` and `GameHUD.tsx` (extract existing UI)
-4. Build 3D components: Terrain, Buildings, PlayerModel3D, Loot3D, Bullets3D, VFX3D
-5. Create `Scene3D.tsx` composing all 3D components
-6. Rewrite `GameArena.tsx` as the orchestrator
-7. Test and optimize
+- Protected route (only users with `admin` role)
+- **Player Management** — Search, view, ban/unban players, adjust K-Coins/K-Gems
+- **News/Events** — Create and push game events/announcements
+- **Stats Overview** — Total players, active matches, revenue metrics
+- Simple table-based UI with action buttons
+
+---
+
+## What This Plan Delivers
+By the end of implementation, you'll have:
+1. A fully functional Supabase backend with the complete item catalog
+2. 12+ unique procedural 3D models (4 characters, 5 weapons, 3 helmets, 3 backpacks)
+3. A polished Visual Store where every item is displayed as its specific 3D model
+4. An Armory/loadout system with equip functionality
+5. Full app navigation shell ready for the Game Arena phase
+6. Admin panel for player and content management
+7. Telegram Mini App authentication
 
