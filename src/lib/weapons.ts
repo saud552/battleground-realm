@@ -3,13 +3,13 @@
 // Official Roster — synced with gameRegistry
 // ============================================
 
-export type AmmoType = '5.56mm' | '7.62mm' | '9mm' | '.300mag' | '12gauge';
+export type AmmoType = '5.56mm' | '7.62mm' | '9mm' | '.300mag' | '12gauge' | '.50ae' | '.45acp';
 
 export interface WeaponConfig {
   id: string;
   name: string;
   nameAr: string;
-  type: 'assault_rifle' | 'smg' | 'sniper' | 'shotgun';
+  type: 'assault_rifle' | 'smg' | 'sniper' | 'shotgun' | 'pistol';
   damage: number;
   fireRate: number;
   bulletSpeed: number;
@@ -120,6 +120,8 @@ export const AMMO_NAMES: Record<AmmoType, string> = {
   '9mm': '9mm',
   '.300mag': '.300 Magnum',
   '12gauge': '12 Gauge',
+  '.50ae': '.50 AE',
+  '.45acp': '.45 ACP',
 };
 
 // Loot item types
@@ -168,6 +170,8 @@ export function createDefaultWeaponState(): WeaponState {
       '9mm': 0,
       '.300mag': 0,
       '12gauge': 0,
+      '.50ae': 0,
+      '.45acp': 0,
     },
     isReloading: false,
     reloadStartTime: 0,

@@ -1,6 +1,6 @@
-import React, { useRef } from 'react';
+import React, { useRef, Suspense } from 'react';
 import { useFrame } from '@react-three/fiber';
-import { Sparkles } from '@react-three/drei';
+import { useGLTF, Sparkles } from '@react-three/drei';
 import * as THREE from 'three';
 
 interface PlayerModel3DProps {
@@ -11,6 +11,7 @@ interface PlayerModel3DProps {
   health: number;
   isDead: boolean;
   isLocal: boolean;
+  characterId?: string;
 }
 
 const TEAM_COLORS = { blue: '#4d8fff', red: '#ff4d4d' };
@@ -22,8 +23,49 @@ const LEVEL_EMISSIVE: Record<number, string> = {
   5: '#ff00ff',
 };
 
+// Character GLB mapping (same as CharacterModel3D)
+const CHARACTER_GLB_MAP: Record<string, string> = {
+  ghost_riley: '/Models/Characters/snake_eyes__fortnite_item_shop_skin.glb',
+  nova_prime: '/Models/Characters/fortnite_oblivion_skin.glb',
+  viper_snake: '/Models/Characters/torin__fortnite_chapter_2_season_8_bp_skin.glb',
+  shadow_exe: '/Models/Characters/the_omega_tier_100_skin_fortnite_3d_model.glb',
+  midas_gold: '/Models/Characters/midas__fortnite_100_tier_s12_bp_skin.glb',
+  marigold: '/Models/Characters/marigold_fortnite_skin__female_midas.glb',
+  glow_phantom: '/Models/Characters/glow__fortnite_outfit.glb',
+};
+
+const GLBPlayerCharacter: React.FC<{ characterId: string }> = ({ characterId }) => {
+  const path = CHARACTER_GLB_MAP[characterId];
+  const { scene } = useGLTF(path);
+  const cloned = React.useMemo(() => scene.clone(), [scene]);
+  return <primitive object={cloned} scale={0.6} position={[0, 0, 0]} />;
+};
+
+// Simple capsule fallback for arena
+const CapsuleFallback: React.FC<{ teamColor: string; emissiveColor: string; emissiveIntensity: number }> = ({ teamColor, emissiveColor, emissiveIntensity }) => (
+  <mesh castShadow position={[0, 0.8, 0]}>
+    <capsuleGeometry args={[0.4, 0.8, 8, 16]} />
+    <meshStandardMaterial
+      color={teamColor}
+      emissive={emissiveColor}
+      emissiveIntensity={emissiveIntensity}
+      roughness={0.5}
+      metalness={0.3}
+    />
+  </mesh>
+);
+
+class GLBErrorBoundary extends React.Component<
+  { children: React.ReactNode; fallback: React.ReactNode },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+  static getDerivedStateFromError() { return { hasError: true }; }
+  render() { return this.state.hasError ? this.props.fallback : this.props.children; }
+}
+
 const PlayerModel3D: React.FC<PlayerModel3DProps> = ({
-  position, rotation, team, skinLevel, health, isDead, isLocal,
+  position, rotation, team, skinLevel, health, isDead, isLocal, characterId,
 }) => {
   const groupRef = useRef<THREE.Group>(null);
   const ringRef = useRef<THREE.Mesh>(null);
@@ -52,19 +94,19 @@ const PlayerModel3D: React.FC<PlayerModel3DProps> = ({
     );
   }
 
+  const hasGLB = characterId && characterId in CHARACTER_GLB_MAP;
+  const capsuleFallback = <CapsuleFallback teamColor={teamColor} emissiveColor={emissiveColor} emissiveIntensity={emissiveIntensity} />;
+
   return (
     <group position={position} ref={groupRef}>
-      {/* Body capsule */}
-      <mesh castShadow position={[0, 0.8, 0]}>
-        <capsuleGeometry args={[0.4, 0.8, 8, 16]} />
-        <meshStandardMaterial
-          color={teamColor}
-          emissive={emissiveColor}
-          emissiveIntensity={emissiveIntensity}
-          roughness={0.5}
-          metalness={0.3}
-        />
-      </mesh>
+      {/* Character model or capsule fallback */}
+      {hasGLB ? (
+        <GLBErrorBoundary fallback={capsuleFallback}>
+          <Suspense fallback={capsuleFallback}>
+            <GLBPlayerCharacter characterId={characterId!} />
+          </Suspense>
+        </GLBErrorBoundary>
+      ) : capsuleFallback}
 
       {/* Weapon barrel */}
       <mesh position={[0, 0.6, -0.9]} rotation={[Math.PI / 2, 0, 0]}>
@@ -90,30 +132,19 @@ const PlayerModel3D: React.FC<PlayerModel3DProps> = ({
 
       {/* Level 5 sparkles */}
       {skinLevel >= 5 && (
-        <Sparkles
-          count={20}
-          scale={2}
-          size={3}
-          speed={0.4}
-          color={emissiveColor}
-          position={[0, 0.8, 0]}
-        />
+        <Sparkles count={20} scale={2} size={3} speed={0.4} color={emissiveColor} position={[0, 0.8, 0]} />
       )}
 
       {/* Health bar */}
       {health < 100 && health > 0 && (
         <group position={[0, 2, 0]}>
-          {/* Background */}
           <mesh>
             <planeGeometry args={[1.2, 0.1]} />
             <meshBasicMaterial color="#222222" />
           </mesh>
-          {/* Health fill */}
           <mesh position={[(health / 100 - 1) * 0.6, 0, 0.001]}>
             <planeGeometry args={[1.2 * (health / 100), 0.1]} />
-            <meshBasicMaterial
-              color={health > 50 ? '#00ff44' : health > 20 ? '#ffcc00' : '#ff3333'}
-            />
+            <meshBasicMaterial color={health > 50 ? '#00ff44' : health > 20 ? '#ffcc00' : '#ff3333'} />
           </mesh>
         </group>
       )}
